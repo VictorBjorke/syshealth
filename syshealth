@@ -1,0 +1,259 @@
+#!/bin/bash
+
+# ============================================
+#        System Health Check Utility
+#        Calculates a health score from
+#          1 to 100 based on system metrics
+# ============================================
+
+set -euo pipefail
+
+# ============================================
+#             Configuration
+# ============================================
+
+VERSION="1.0"
+SCRIPT_NAME="syshealth"
+
+# Default report file
+USERNAME=$(whoami)
+REPORT_FILE="/home/$USERNAME/system_health_report.md"
+
+# ============================================
+#           Function Definitions
+# ============================================
+
+# Function to display help
+show_help() {
+    cat << EOF
+Usage: $SCRIPT_NAME [options]
+
+Options:
+  -h, --help         Show this help message and exit
+  -v, --version      Show version information and exit
+  -r, --report FILE  Specify a custom report file path
+
+Description:
+  $SCRIPT_NAME is a utility that calculates a system health score based on various system metrics
+  such as CPU usage, memory usage, disk space, and load average. It generates a detailed
+  Markdown report highlighting areas for improvement.
+
+EOF
+}
+
+# Function to display version
+show_version() {
+    echo "$SCRIPT_NAME version $VERSION"
+}
+
+# Function to check for required commands
+check_dependencies() {
+    local missing_dependencies=()
+    local required_commands=("mpstat" "bc" "awk" "nproc" "uptime" "df" "free")
+
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_dependencies+=("$cmd")
+        fi
+    done
+
+    if [ "${#missing_dependencies[@]}" -ne 0 ]; then
+        echo "Error: The following required commands are missing:"
+        for cmd in "${missing_dependencies[@]}"; do
+            echo " - $cmd"
+        done
+        echo "Please install them and try again."
+        exit 1
+    fi
+}
+
+# Function to display a progress bar
+show_progress() {
+    local duration=$1
+    local cols=$(tput cols)
+    local bar_length=$((cols - 10))
+    local increment=$(echo "$duration / $bar_length" | bc -l)
+    printf "["
+    for ((i = 0; i < bar_length; i++)); do
+        printf "#"
+        sleep "$increment"
+    done
+    printf "]\n"
+}
+
+# ============================================
+#              Parse Arguments
+# ============================================
+
+# If no arguments are provided, proceed with default behavior
+if [ $# -gt 0 ]; then
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                show_version
+                exit 0
+                ;;
+            -r|--report)
+                shift
+                if [ -z "${1:-}" ]; then
+                    echo "Error: '--report' requires a file path argument."
+                    exit 1
+                fi
+                REPORT_FILE="$1"
+                ;;
+            *)
+                echo "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+        shift
+    done
+fi
+
+# ============================================
+#            Check Dependencies
+# ============================================
+
+check_dependencies
+
+# ============================================
+#        Begin System Health Calculation
+# ============================================
+
+# Initialize total score and weight sum
+total_score=0
+weight_sum=0
+declare -a low_scores=()
+
+echo "Calculating system health score..."
+show_progress 3
+
+# Prepare the markdown report file
+echo "# 🖥️ System Health Report" > "$REPORT_FILE"
+echo "Generated on $(date)" >> "$REPORT_FILE"
+echo -e "\n---\n" >> "$REPORT_FILE"
+echo "## 📊 **Metric Breakdown**" >> "$REPORT_FILE"
+
+# CPU Usage
+if command -v mpstat >/dev/null 2>&1; then
+    cpu_idle=$(mpstat 1 1 | awk '/Average/ {print $NF}')
+else
+    cpu_idle=$(top -bn1 | grep "Cpu(s)" | awk '{print $8}')
+fi
+cpu_usage=$(echo "100 - $cpu_idle" | bc)
+cpu_score=$(printf "%.0f" "$(echo "100 - $cpu_usage" | bc)")
+cpu_weight=0.3
+total_score=$(echo "$total_score + ($cpu_score * $cpu_weight)" | bc -l)
+weight_sum=$(echo "$weight_sum + $cpu_weight" | bc -l)
+
+# Record if score is low
+if (( $(echo "$cpu_score < 70" | bc -l) )); then
+    low_scores+=("CPU Usage is high at ${cpu_usage}%.")
+fi
+
+# Append to report
+echo "- **CPU Usage**: ${cpu_usage}% used — **Score**: ${cpu_score}/100" >> "$REPORT_FILE"
+
+# Memory Usage
+mem_info=$(free -m)
+mem_total=$(echo "$mem_info" | awk '/Mem:/ {print $2}')
+mem_available=$(echo "$mem_info" | awk '/Mem:/ {print $7}')
+mem_usage=$(echo "($mem_total - $mem_available) / $mem_total * 100" | bc -l)
+mem_score=$(echo "100 - $mem_usage" | bc)
+mem_score=$(printf "%.0f" "$mem_score")
+mem_weight=0.3
+total_score=$(echo "$total_score + ($mem_score * $mem_weight)" | bc -l)
+weight_sum=$(echo "$weight_sum + $mem_weight" | bc -l)
+
+if (( $(echo "$mem_score < 70" | bc -l) )); then
+    low_scores+=("Memory Usage is high at $(printf "%.1f" "$mem_usage")%.")
+fi
+
+echo "- **Memory Usage**: $(printf "%.1f" "$mem_usage")% used — **Score**: ${mem_score}/100" >> "$REPORT_FILE"
+
+# Disk Usage
+disk_info=$(df / | tail -1)
+disk_usage=$(echo "$disk_info" | awk '{print $5}' | tr -d '%')
+disk_score=$(echo "100 - $disk_usage" | bc)
+disk_weight=0.2
+total_score=$(echo "$total_score + ($disk_score * $disk_weight)" | bc -l)
+weight_sum=$(echo "$weight_sum + $disk_weight" | bc -l)
+
+if (( $(echo "$disk_score < 70" | bc -l) )); then
+    low_scores+=("Disk Usage is high at ${disk_usage}%.")
+fi
+
+echo "- **Disk Usage**: ${disk_usage}% used — **Score**: ${disk_score}/100" >> "$REPORT_FILE"
+
+# Load Average
+load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | cut -d, -f1 | sed 's/ //g')
+cpu_cores=$(nproc)
+load_ratio=$(echo "$load_avg / $cpu_cores * 100" | bc -l)
+load_score=$(echo "100 - $load_ratio" | bc)
+if (( $(echo "$load_score < 0" | bc -l) )); then
+    load_score=0
+fi
+load_score=$(printf "%.0f" "$load_score")
+load_weight=0.2
+total_score=$(echo "$total_score + ($load_score * $load_weight)" | bc -l)
+weight_sum=$(echo "$weight_sum + $load_weight" | bc -l)
+
+if (( $(echo "$load_score < 70" | bc -l) )); then
+    low_scores+=("System Load is high at $(printf "%.2f" "$load_avg").")
+fi
+
+echo "- **Load Average**: $(printf "%.2f" "$load_avg") — **Score**: ${load_score}/100" >> "$REPORT_FILE"
+
+# Calculate the final health score
+health_score=$(echo "$total_score / $weight_sum" | bc -l)
+health_score=$(printf "%.0f" "$health_score")
+if [ "$health_score" -gt 100 ]; then
+    health_score=100
+fi
+
+# Append overall score to report
+echo -e "\n## 🏁 **Overall Health Score**" >> "$REPORT_FILE"
+echo "**$health_score out of 100**" >> "$REPORT_FILE"
+
+# Provide suggestions if any metrics are low
+if [ "${#low_scores[@]}" -ne 0 ]; then
+    echo -e "\n## ⚠️ **Areas for Improvement**" >> "$REPORT_FILE"
+    for issue in "${low_scores[@]}"; do
+        echo "- $issue" >> "$REPORT_FILE"
+    done
+fi
+
+# ============================================
+#               Display Output
+# ============================================
+
+# Fancy Output
+echo
+echo -e "\033[1;34m======================================\033[0m"
+echo -e "          \033[1;32mSystem Health Score\033[0m         "
+echo -e "\033[1;34m======================================\033[0m"
+echo
+echo -e "        Your system health is:"
+echo
+echo -e "             \033[1;31m$health_score out of 100\033[0m"
+echo
+if [ "${#low_scores[@]}" -ne 0 ]; then
+    echo -e "\033[1;33mAreas for Improvement:\033[0m"
+    for issue in "${low_scores[@]}"; do
+        echo -e " - $issue"
+    done
+    echo
+fi
+echo -e "Detailed report saved to \033[1;34m$REPORT_FILE\033[0m"
+echo
+echo -e "\033[1;34m======================================\033[0m"
+echo
+
+# ============================================
+#                End of Script
+# ============================================

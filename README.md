@@ -3,6 +3,7 @@
 **System Health Check Utility**
 
 `syshealth` is a utility that calculates a system health score based on various system metrics such as CPU usage, memory usage, disk space, and load average. It generates a Markdown report highlighting areas for improvement.
+This script is mostly just made for learning. Doesn't really tell you much if we're being completely honest. The markdown report is severely lacking in details too.
 
 ## 📥 Installation
 
